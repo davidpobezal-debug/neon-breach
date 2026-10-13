@@ -217,12 +217,30 @@ const G=(()=>{
  const canvas=document.getElementById('view');const gl=canvas.getContext('webgl',{antialias:false,alpha:false});
  if(!gl){document.getElementById('notice').textContent='Táto hra potrebuje zapnutú grafickú akceleráciu prehliadača.';throw Error('WebGL unavailable')}
  const derivatives=gl.getExtension('OES_standard_derivatives');
+ // The classic fract(sin(x)*43758.5453) hash is very sensitive to how a GPU evaluates sin() for large
+ // arguments. Stars and floor/wall grain feed it large cell coordinates, so they use a sin-free hash
+ // that gives the same result on every GPU. Add ?hash=old to the URL to get the previous hash back.
+ const legacyHash=/[?&]hash=old\b/.test(location.search);
  const depthTextures=gl.getExtension('WEBGL_depth_texture');
  const vs=`attribute vec3 p;attribute vec3 n;attribute vec3 c;attribute float k;uniform mat4 vp;uniform mat4 model;varying vec3 P;varying vec3 N;varying vec3 C;varying float K;void main(){vec4 w=model*vec4(p,1.);P=w.xyz;N=mat3(model)*n;C=c;K=k;gl_Position=vp*w;}`;
- const fs=`${derivatives?'#extension GL_OES_standard_derivatives : enable\n':''}precision highp float;
+ const fs=`${derivatives?'#extension GL_OES_standard_derivatives : enable\n':''}${legacyHash?'':'#define SAFE_HASH\n'}precision highp float;
 varying vec3 P;varying vec3 N;varying vec3 C;varying float K;
 uniform vec3 eye;uniform vec4 lp[12];uniform vec3 lc[12];uniform float clock;
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float hash2(vec2 p){
+#ifdef SAFE_HASH
+ vec3 p3=fract(vec3(p.xyx)*.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);
+#else
+ return hash(p);
+#endif
+}
+// The sin hash is not uniform, so it produced fewer stars than a uniform hash would at the same cut-off;
+// the safe hash uses a higher cut-off to keep the same average star density as before.
+#ifdef SAFE_HASH
+#define STAR_CUT .98
+#else
+#define STAR_CUT .968
+#endif
 float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);}
 float fbm(vec2 p){return noise(p)*.55+noise(p*2.03)*.27+noise(p*4.07)*.12+noise(p*8.11)*.06;}
 // Fade material marks smaller than a screen pixel instead of letting them shimmer.
@@ -238,10 +256,10 @@ void main(){
   float mist=fbm(q.xy*4.+q.z*2.);float ribbon=pow(max(0.,1.-abs(q.y*.95+q.x*.38-.08)),6.);
   vec3 sky=vec3(.006,.013,.029)+ribbon*pow(mist,2.)*vec3(.11,.16,.29);
   sky+=pow(max(0.,fbm(q.yz*5.)-.42),2.)*vec3(.22,.08,.25);
-  vec2 grid=uv*130.;vec2 cell=floor(grid);float h=hash(cell+face*67.);
-  vec2 centre=vec2(.23+.54*hash(cell+17.),.23+.54*hash(cell+39.));
-  float star=(1.-smoothstep(.06,.17,length(fract(grid)-centre)))*step(.968,h);
-  sky+=star*mix(vec3(.38,.59,.82),vec3(.92,.9,.78),hash(cell+83.));
+  vec2 grid=uv*130.;vec2 cell=floor(grid);float h=hash2(cell+face*67.);
+  vec2 centre=vec2(.23+.54*hash2(cell+17.),.23+.54*hash2(cell+39.));
+  float star=(1.-smoothstep(.06,.17,length(fract(grid)-centre)))*step(STAR_CUT,h);
+  sky+=star*mix(vec3(.38,.59,.82),vec3(.92,.9,.78),hash2(cell+83.));
   gl_FragColor=vec4(sky,1.);return;
  }
  if(K>4.5&&K<5.5){
@@ -295,18 +313,18 @@ void main(){
  }
  bool baked=K>7.5;float material=baked?K-8.:K;
  vec3 base=C;vec3 light=baked?vec3(1.):vec3(.46,.56,.64);vec3 spec=vec3(0.);
- float grain=hash(floor(P.xz*14.)+floor(P.y*14.));
+ float grain=hash2(floor(P.xz*14.)+floor(P.y*14.));
  if(material<.5){vec2 f=fract(P.xz);float seam=step(.018,min(min(f.x,f.y),min(1.-f.x,1.-f.y)));base*=mix(.98,mix(.58,1.,seam),detail(P.xz,18.));base*=mix(.98,.88+grain*.20,detail(P.xz,14.));
   if(P.x>39.5&&P.x<55.3&&P.z>29.5&&P.z<46.){
-   vec2 tile=floor(P.xz);base*=.91+hash(tile)*.16;
-   float scratch=step(.988,hash(floor(P.xz*36.)))*step(.67,grain);base+=vec3(.018,.023,.019)*scratch*detail(P.xz,36.);
+   vec2 tile=floor(P.xz);base*=.91+hash2(tile)*.16;
+   float scratch=step(.988,hash2(floor(P.xz*36.)))*step(.67,grain);base+=vec3(.018,.023,.019)*scratch*detail(P.xz,36.);
    // Soft, fixed light footprints from the physical grow lamps; no camera-dependent popping.
    float spill=0.;for(int j=0;j<4;j++){vec2 lamp=vec2(j<2?44.5:51.5,(j==0||j==2)?35.4:40.6);vec2 q=(P.xz-lamp)/vec2(1.7,2.5);spill+=exp(-dot(q,q)*.65);}
    base+=vec3(.013,.034,.018)*spill;
   }}
  else if(material<2.5){
   vec2 uv=abs(normal.x)>.5?P.zy:abs(normal.y)>.5?P.xz:P.xy;
-  float fine=hash(floor(uv*34.)),visible=detail(uv,34.);base*=mix(.985,.92+fine*.13,visible);
+  float fine=hash2(floor(uv*34.)),visible=detail(uv,34.);base*=mix(.985,.92+fine*.13,visible);
   if(material>1.5){float wear=step(.98,fine)*step(.55,grain);base+=vec3(.045,.049,.04)*wear*visible;}
  }
  if(material>2.5){gl_FragColor=vec4(base,1.);return;}
@@ -317,7 +335,51 @@ void main(){
  const prog=gl.createProgram();gl.attachShader(prog,shader(gl.VERTEX_SHADER,vs));gl.attachShader(prog,shader(gl.FRAGMENT_SHADER,fs));gl.linkProgram(prog);if(!gl.getProgramParameter(prog,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(prog));gl.useProgram(prog);
  const attrs=['p','n','c','k'].map(x=>gl.getAttribLocation(prog,x)),uniforms={};for(const x of ['vp','model','eye','lp','lc','clock'])uniforms[x]=gl.getUniformLocation(prog,x==='lp'||x==='lc'?x+'[0]':x);
  const post=gl.createProgram();gl.attachShader(post,shader(gl.VERTEX_SHADER,'attribute vec2 position;varying vec2 uv;void main(){uv=position*.5+.5;gl_Position=vec4(position,0.,1.);}'));gl.attachShader(post,shader(gl.FRAGMENT_SHADER,`precision mediump float;varying vec2 uv;uniform sampler2D source;uniform vec2 texel;vec3 bright(vec2 off){vec3 c=texture2D(source,uv+off*texel).rgb;return c*max(0.,max(c.r,max(c.g,c.b))-.65);}void main(){vec3 c=texture2D(source,uv).rgb;vec3 glow=bright(vec2(2.,0.))+bright(vec2(-2.,0.))+bright(vec2(0.,2.))+bright(vec2(0.,-2.))+bright(vec2(3.,3.))+bright(vec2(-3.,3.))+bright(vec2(3.,-3.))+bright(vec2(-3.,-3.));gl_FragColor=vec4(c+glow*.085,1.);}`));gl.linkProgram(post);if(!gl.getProgramParameter(post,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(post));const screen=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,screen);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,1,1,-1,-1,1,1,-1,1]),gl.STATIC_DRAW);const postPos=gl.getAttribLocation(post,'position'),postTexel=gl.getUniformLocation(post,'texel'),postSource=gl.getUniformLocation(post,'source');
- const frame=gl.createFramebuffer(),texture=gl.createTexture(),depth=gl.createRenderbuffer(),depthTexture=depthTextures?gl.createTexture():null;let targetW=0,targetH=0;
+ // Desktop presentation: the 3D image keeps exactly the same internal pixel grid as before.
+ // Only the last step (stretching it to the physical screen) changes: whole-number ratios stay
+ // plain nearest-neighbour, other ratios use "sharp bilinear" so pixels are even instead of
+ // alternating wide and narrow. Add ?scale=old to the URL to get the previous behaviour.
+ const legacyScale=/[?&]scale=old\b/.test(location.search);
+ let present=null,presentSource,presentSrc,presentOut,presentSharp,postFrame=null,postTexture=null,postW=0,postH=0,devW=0,devH=0,presentFailed=false,imageRendering=null;
+ const presenting=()=>!presentFailed&&!legacyScale&&!document.documentElement.classList.contains('touch-mode');
+ try{
+  const presentVertex='attribute vec2 position;varying vec2 uv;void main(){uv=position*.5+.5;gl_Position=vec4(position,0.,1.);}';
+  const presentFragment=`#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 uv;uniform sampler2D source;uniform vec2 srcSize;uniform vec2 outSize;uniform float sharp;
+void main(){
+ vec2 pix=uv*srcSize;vec2 target=floor(pix)+.5;
+ if(sharp>.5){
+  vec2 scale=outSize/srcSize;vec2 region=max(.5-.5/scale,0.);vec2 d=fract(pix)-.5;
+  vec2 sharpPos=floor(pix)+(d-clamp(d,-region,region))*scale+.5;
+  target=mix(pix,sharpPos,step(vec2(1.),scale));
+ }
+ gl_FragColor=vec4(texture2D(source,target/srcSize).rgb,1.);
+}`;
+  present=gl.createProgram();gl.attachShader(present,shader(gl.VERTEX_SHADER,presentVertex));gl.attachShader(present,shader(gl.FRAGMENT_SHADER,presentFragment));
+  gl.bindAttribLocation(present,postPos,'position');gl.linkProgram(present);
+  if(!gl.getProgramParameter(present,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(present));
+  presentSource=gl.getUniformLocation(present,'source');presentSrc=gl.getUniformLocation(present,'srcSize');presentOut=gl.getUniformLocation(present,'outSize');presentSharp=gl.getUniformLocation(present,'sharp');
+ }catch(e){present=null;presentFailed=true}
+ // Exact size of the canvas in physical pixels (falls back to CSS size x devicePixelRatio).
+ try{if(typeof ResizeObserver==='function')new ResizeObserver(entries=>{const box=entries[entries.length-1].devicePixelContentBoxSize;if(box&&box[0]){devW=Math.round(box[0].inlineSize);devH=Math.round(box[0].blockSize)}}).observe(canvas,{box:'device-pixel-content-box'})}catch(e){}
+ // The observer value is exact (it already accounts for rounding at fractional zoom); it is only
+ // trusted when it agrees with CSS size x devicePixelRatio, otherwise the calculation is used.
+ function deviceSize(){const r=window.devicePixelRatio||1,cw=Math.round(canvas.clientWidth*r),ch=Math.round(canvas.clientHeight*r);return [Math.min(8192,Math.max(1,Math.abs(devW-cw)<=2?devW:cw)),Math.min(8192,Math.max(1,Math.abs(devH-ch)<=2?devH:ch))]}
+ function allocPost(w,h){
+  if(!postFrame){postFrame=gl.createFramebuffer();postTexture=gl.createTexture()}
+  gl.bindTexture(gl.TEXTURE_2D,postTexture);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,postFrame);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,postTexture,0);
+  const ok=gl.checkFramebufferStatus(gl.FRAMEBUFFER)===gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.bindTexture(gl.TEXTURE_2D,null);
+  if(ok){postW=w;postH=h}else presentFailed=true;
+ }
+ const frame=gl.createFramebuffer(),texture=gl.createTexture(),depth=gl.createRenderbuffer(),depthTexture=depthTextures?gl.createTexture():null;let targetW=0,targetH=0,depth16=false;
  function target(w,h){
   const setupTexture=()=>{gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);};
   gl.bindTexture(gl.TEXTURE_2D,texture);setupTexture();gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
@@ -325,11 +387,27 @@ void main(){
   // 16-bit depth loses centimetre-sized panel separation across a room. Prefer
   // the higher precision depth format provided by WebGL 1's depth extension.
   if(depthTexture){gl.bindTexture(gl.TEXTURE_2D,depthTexture);setupTexture();gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT,w,h,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,depthTexture,0);}
-  if(!depthTexture||gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){gl.bindRenderbuffer(gl.RENDERBUFFER,depth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,w,h);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,depth);}
+  if(!depthTexture||gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){depth16=true;gl.bindRenderbuffer(gl.RENDERBUFFER,depth);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,w,h);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,depth);}
   if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Incomplete render target');
   gl.bindTexture(gl.TEXTURE_2D,null);targetW=w;targetH=h;
  }
- function finish(){gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.disable(gl.DEPTH_TEST);gl.useProgram(post);for(const a of attrs)gl.disableVertexAttribArray(a);gl.bindBuffer(gl.ARRAY_BUFFER,screen);gl.enableVertexAttribArray(postPos);gl.vertexAttribPointer(postPos,2,gl.FLOAT,false,0,0);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.uniform1i(postSource,0);gl.uniform2f(postTexel,1/targetW,1/targetH);gl.drawArrays(gl.TRIANGLES,0,6)}
+ function setImageRendering(value){if(imageRendering!==value){imageRendering=value;canvas.style.imageRendering=value}}
+ function finish(){
+  if(!presenting()){setImageRendering('');legacyFinish();return}
+  // Pass 1: the unchanged glow pass, into an internal-resolution texture.
+  gl.bindFramebuffer(gl.FRAMEBUFFER,postFrame);gl.viewport(0,0,targetW,targetH);gl.disable(gl.DEPTH_TEST);gl.useProgram(post);
+  for(const a of attrs)gl.disableVertexAttribArray(a);
+  gl.bindBuffer(gl.ARRAY_BUFFER,screen);gl.enableVertexAttribArray(postPos);gl.vertexAttribPointer(postPos,2,gl.FLOAT,false,0,0);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.uniform1i(postSource,0);gl.uniform2f(postTexel,1/targetW,1/targetH);gl.drawArrays(gl.TRIANGLES,0,6);
+  // Pass 2: stretch it to the physical pixels of the canvas.
+  const [dw,dh]=deviceSize();if(canvas.width!==dw||canvas.height!==dh){canvas.width=dw;canvas.height=dh}
+  setImageRendering('auto');
+  const sx=dw/targetW,sy=dh/targetH,whole=sx>=1&&sy>=1&&Math.abs(sx-Math.round(sx))<.002&&Math.abs(sy-Math.round(sy))<.002;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,dw,dh);gl.useProgram(present);
+  gl.bindTexture(gl.TEXTURE_2D,postTexture);gl.uniform1i(presentSource,0);gl.uniform2f(presentSrc,targetW,targetH);gl.uniform2f(presentOut,dw,dh);gl.uniform1f(presentSharp,whole?0:1);
+  gl.vertexAttribPointer(postPos,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,6);
+ }
+ function legacyFinish(){gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.disable(gl.DEPTH_TEST);gl.useProgram(post);for(const a of attrs)gl.disableVertexAttribArray(a);gl.bindBuffer(gl.ARRAY_BUFFER,screen);gl.enableVertexAttribArray(postPos);gl.vertexAttribPointer(postPos,2,gl.FLOAT,false,0,0);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.uniform1i(postSource,0);gl.uniform2f(postTexel,1/targetW,1/targetH);gl.drawArrays(gl.TRIANGLES,0,6)}
  const identity=()=>new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
  function multiply(a,b){const r=new Float32Array(16);for(let col=0;col<4;col++)for(let row=0;row<4;row++)for(let k=0;k<4;k++)r[col*4+row]+=a[k*4+row]*b[col*4+k];return r}
  function perspective(fov,aspect,near,far){const f=1/Math.tan(fov/2),r=new Float32Array(16);r[0]=f/aspect;r[5]=f;r[10]=(far+near)/(near-far);r[11]=-1;r[14]=2*far*near/(near-far);return r}
@@ -359,8 +437,19 @@ void main(){
   const width=mobile?Math.max(240,Math.min(640,Math.round(Math.sqrt(240000*aspect)),Math.round(cw))):Math.min(desktopWidth,Math.max(640,Math.round(cw)));
   return {aspect,width,height:Math.max(1,Math.round(width/aspect))};
  }
- function begin(player,lights,time){const {aspect,width,height}=renderSize();if(canvas.width!==width||canvas.height!==height){canvas.width=width;canvas.height=height}gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(.016,.032,.061,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);const eye=[player.x,1.45,player.y];gl.uniformMatrix4fv(uniforms.vp,false,multiply(perspective(1.14,aspect,.12,240),view(...eye,player.a,player.pitch)));gl.uniform3fv(uniforms.eye,eye);gl.uniform1f(uniforms.clock,time);const nearest=lights.slice(0,12);const pos=new Float32Array(48),cols=new Float32Array(36);for(let i=0;i<12;i++){const l=nearest[i]||{x:0,y:0,z:0,r:1,c:[0,0,0]};pos.set([l.x,l.y,l.z,l.r],i*4);cols.set(color(l.c),i*3)}gl.uniform4fv(uniforms.lp,pos);gl.uniform3fv(uniforms.lc,cols)}
- const originalBegin=begin;begin=function(...args){gl.useProgram(prog);const {width:w,height:h}=renderSize();if(w!==targetW||h!==targetH)target(w,h);else gl.bindFramebuffer(gl.FRAMEBUFFER,frame);originalBegin(...args)};
+ function begin(player,lights,time){const {aspect,width,height}=renderSize();if(!presenting()&&(canvas.width!==width||canvas.height!==height)){canvas.width=width;canvas.height=height}gl.viewport(0,0,width,height);gl.clearColor(.016,.032,.061,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);const eye=[player.x,1.45,player.y];gl.uniformMatrix4fv(uniforms.vp,false,multiply(perspective(1.14,aspect,.12,240),view(...eye,player.a,player.pitch)));gl.uniform3fv(uniforms.eye,eye);gl.uniform1f(uniforms.clock,time);const nearest=lights.slice(0,12);const pos=new Float32Array(48),cols=new Float32Array(36);for(let i=0;i<12;i++){const l=nearest[i]||{x:0,y:0,z:0,r:1,c:[0,0,0]};pos.set([l.x,l.y,l.z,l.r],i*4);cols.set(color(l.c),i*3)}gl.uniform4fv(uniforms.lp,pos);gl.uniform3fv(uniforms.lc,cols)}
+ const originalBegin=begin;begin=function(...args){gl.useProgram(prog);const {width:w,height:h}=renderSize();if(presenting()&&(postW!==w||postH!==h))allocPost(w,h);if(w!==targetW||h!==targetH)target(w,h);else gl.bindFramebuffer(gl.FRAMEBUFFER,frame);originalBegin(...args)};
+ // ?debug=1 shows a small panel with the facts that decide how the image is drawn on this machine.
+ if(/[?&]debug\b/.test(location.search))setInterval(()=>{
+  let el=document.getElementById('gpuDebug');
+  if(!el){el=document.createElement('pre');el.id='gpuDebug';el.style.cssText='position:fixed;left:8px;top:8px;z-index:99;margin:0;padding:8px;background:#000c;color:#9fe;font:11px monospace;white-space:pre;pointer-events:none';document.body.appendChild(el)}
+  const ext=gl.getExtension('WEBGL_debug_renderer_info');
+  el.textContent=['GPU: '+(ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)),
+   'dpr '+devicePixelRatio+'  css '+canvas.clientWidth+'x'+canvas.clientHeight,
+   'canvas '+canvas.width+'x'+canvas.height+'  internal '+targetW+'x'+targetH+'  sharp scaling '+presenting(),
+   'derivatives '+!!derivatives+'  depthTexture '+!!depthTextures+'  depth16 fallback '+depth16,
+   'hash '+(legacyHash?'old (sin)':'safe')].join('\n');
+ },1000);
  return {gl,canvas,identity,multiply,transform,quad,box,sphere,mesh,draw,remove,begin,finish,color,bake,glass};
 })();
 
